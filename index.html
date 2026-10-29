@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>答題擂台｜參與者</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="quiz-data.js"></script>
+<script src="common.js"></script>
+<script>
+(function () {
+  'use strict';
+  var QA = window.QA;
+  var clientId = QA.getClientId();
+
+  var p = {
+    code: '', name: '',
+    joinErr: null, joining: false, joined: false, foundGame: false, ended: false,
+    es: null, joinTimeout: null,
+    phase: null, qIndex: -1, questionStartedAt: null,
+    myQStartedAt: null, answeredQIndex: -1, lastOptionIndex: -1,
+    scores: {}, revealTally: null, revealGains: null
+  };
+  try { p.name = localStorage.getItem('qa_last_name_v1') || ''; } catch (e) {}
+
+  var notice = null;
+  var app = document.getElementById('app');
+
+  function setNotice(msg) {
+    notice = msg;
+    render();
+    clearTimeout(setNotice._t);
+    setNotice._t = setTimeout(function () { notice = null; render(); }, 2600);
+  }
+
+  // ---------------------------------------------------------------------
+  // 加入流程
+  // ---------------------------------------------------------------------
+  function joinGame() {
+    var code = (p.code || '').trim();
+    var name = (p.name || '').trim().slice(0, 16);
+    if (!/^[0-9]{6}$/.test(code)) { p.joinErr = '請輸入 6 位數字的遊戲代碼'; render(); return; }
+    if (!name) { p.joinErr = '請輸入你的暱稱'; render(); return; }
+    p.joining = true; p.joinErr = null; p.foundGame = false;
+    render();
+    try { localStorage.setItem('qa_last_name_v1', name); } catch (e) {}
+
+    if (p.es) { try { p.es.close(); } catch (e) {} }
+    p.es = new EventSource(QA.ntfySseUrl(code));
+    p.es.onmessage = function (e) {
+      var msg = QA.parseEnvelope(e.data);
+      if (!msg || msg.type !== 'state') return;
+      if (!p.foundGame) {
+        p.foundGame = true;
+        p.joining = false;
+        p.joined = true;
+        clearTimeout(p.joinTimeout);
+        QA.publish(code, { type: 'join', clientId: clientId, name: name });
+      }
+      applyState(msg);
+    };
+    p.es.onerror = function () {
+      if (!p.foundGame) { /* 連線中，先等逾時處理 */ }
+    };
+    p.joinTimeout = setTimeout(function () {
+      if (!p.foundGame) {
+        try { p.es.close(); } catch (e) {}
+        p.joining = false;
+        p.joinErr = '找不到這個遊戲代碼，請確認代碼是否正確、主持人是否已開始遊戲';
+        render();
+      }
+    }, 7000);
+  }
+
+  function applyState(msg) {
+    var qChanged = msg.qIndex !== p.qIndex;
+    p.phase = msg.phase;
+    p.qIndex = msg.qIndex;
+    p.questionStartedAt = msg.questionStartedAt;
+    p.scores = msg.scores || {};
+    p.revealTally = msg.revealTally;
+    p.revealGains = msg.revealGains;
+    if (p.phase === 'question' && qChanged) {
+      p.myQStartedAt = Date.now();
+      p.answeredQIndex = -1;
+      p.lastOptionIndex = -1;
+    }
+    render();
+  }
+
+  function leaveGame() {
+    try { if (p.es) p.es.close(); } catch (e) {}
+    p = {
+      code: '', name: p.name, joinErr: null, joining: false, joined: false, foundGame: false, ended: false,
+      es: null, joinTimeout: null, phase: null, qIndex: -1, questionStartedAt: null,
+      myQStartedAt: null, answeredQIndex: -1, lastOptionIndex: -1, scores: {}, revealTally: null, revealGains: null
+    };
+    render();
+  }
+
+  function submitAnswer(optionIndex) {
+    if (p.phase !== 'question') return;
+    if (p.answeredQIndex === p.qIndex) return;
+    var q = window.QUIZ.questions[p.qIndex];
+    var elapsedMs = Date.now() - (p.myQStartedAt || Date.now());
+    if (elapsedMs > q.duration * 1000 + 1500) { setNotice('已經來不及作答囉'); return; }
+    p.answeredQIndex = p.qIndex;
+    p.lastOptionIndex = optionIndex;
+    render();
+    QA.publish(p.code, {
+      type: 'answer', clientId: clientId, name: p.name,
+      qIndex: p.qIndex, optionIndex: optionIndex, elapsedMs: elapsedMs
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // 畫面
+  // ---------------------------------------------------------------------
+  function topbar() {
+    return '<div class="topbar">' +
+      '<div class="brand"><b>答題擂台</b><span>參與者模式</span></div>' +
+      (p.joined ? '<button class="btn btn-ghost btn-icon" data-action="leave">離開</button>' : '') +
+      '</div>';
+  }
+
+  function renderJoinForm() {
+    var html = '<div class="shell">' + topbar();
+    html += '<div class="card stack">' +
+      '<p class="eyebrow">加入遊戲</p>' +
+      '<label class="field">遊戲代碼<input class="code-input" type="text" inputmode="numeric" id="join-code" maxlength="6" value="' + QA.esc(p.code) + '" placeholder="000000"></label>' +
+      '<label class="field">你的暱稱<input type="text" id="join-name" maxlength="16" value="' + QA.esc(p.name) + '" placeholder="輸入暱稱"></label>' +
+      (p.joinErr ? '<p style="color:var(--bad);font-weight:600">' + QA.esc(p.joinErr) + '</p>' : '') +
+      '<button class="btn btn-primary btn-lg btn-block" data-action="join-submit" ' + (p.joining ? 'disabled' : '') + '>' + (p.joining ? '連線中…' : '加入遊戲') + '</button>' +
+      '</div></div>';
+    return html;
+  }
+
+  function renderLobbyWait() {
+    return '<div class="shell">' + topbar() +
+      '<div class="card stack center"><p class="eyebrow">等待主持人開始</p><h2>嗨，' + QA.esc(p.name) + '！</h2>' +
+      '<p style="color:var(--muted)">測驗「' + QA.esc(window.QUIZ.title) + '」即將開始，請準備好搶答！</p></div></div>';
+  }
+
+  function renderAnnouncement() {
+    var slide = window.QUIZ.questions[p.qIndex];
+    return '<div class="shell">' + topbar() +
+      '<div class="card stack center">' +
+      '<p class="eyebrow">接下來的關卡</p>' +
+      '<h2 style="font-size:28px">' + QA.esc(slide.title) + '</h2>' +
+      (slide.subtitle ? '<p style="color:var(--muted)">' + QA.esc(slide.subtitle) + '</p>' : '') +
+      '<p style="color:var(--muted);margin-top:8px">請稍候，主持人準備開始這一關…</p>' +
+      '</div></div>';
+  }
+
+  function renderQuestion() {
+    var q = window.QUIZ.questions[p.qIndex];
+    var progress = QA.questionProgress(p.qIndex);
+    var total = q.duration * 1000;
+    var elapsed = Date.now() - (p.questionStartedAt || Date.now());
+    var remain = Math.max(0, total - elapsed);
+    var pct = QA.clamp(remain / total * 100, 0, 100);
+    var answered = p.answeredQIndex === p.qIndex;
+    var html = '<div class="shell">' + topbar();
+    html += '<div class="card stack">' +
+      '<div class="spread"><span class="chip chip-accent">第 ' + progress.num + ' / ' + progress.total + ' 題</span><span class="timernum">' + Math.ceil(remain / 1000) + ' 秒</span></div>' +
+      '<div class="timerbar"><div style="width:' + pct + '%"></div></div>';
+    if (!answered) {
+      html += '<p class="qtext">' + QA.esc(q.text) + '</p><div class="tiles">';
+      q.options.forEach(function (opt, i) {
+        html += '<button class="tile ' + QA.TILE_CLASS[i] + '" data-action="answer" data-idx="' + i + '">' + QA.shapeSvg(i) + '<span>' + QA.esc(opt) + '</span></button>';
+      });
+      html += '</div>';
+    } else {
+      html += '<div class="result-banner" style="background:var(--surface-2)"><p class="eyebrow">答案已送出</p><p>等待其他人作答…</p></div>';
+    }
+    html += '</div></div>';
+    return html;
+  }
+
+  function renderReveal() {
+    var q = window.QUIZ.questions[p.qIndex];
+    var answeredThis = p.answeredQIndex === p.qIndex;
+    var correct = answeredThis && p.lastOptionIndex === q.correctIndex;
+    var gained = (p.revealGains && p.revealGains[clientId]) || 0;
+    var myScore = (p.scores && p.scores[clientId] && p.scores[clientId].score) || 0;
+    var html = '<div class="shell">' + topbar();
+    if (answeredThis) {
+      html += '<div class="result-banner ' + (correct ? 'result-good' : 'result-bad') + '">' +
+        '<p class="eyebrow" style="color:inherit">' + (correct ? '答對了！' : '答錯了') + '</p>' +
+        '<span class="pts">+' + gained + '</span>' +
+        '<p style="margin-top:4px">目前總分：' + myScore + '</p>' +
+        '</div>';
+    } else {
+      html += '<div class="result-banner" style="background:var(--surface-2)"><p>這一題沒有來得及作答</p></div>';
+    }
+    html += '<div class="card stack">' + QA.renderTally(p.qIndex, p.revealTally) +
+      (q.explanation ? '<div class="card-flat"><p class="eyebrow">小知識</p><p>' + QA.esc(q.explanation) + '</p></div>' : '') +
+      '</div>';
+    html += '<div class="card stack"><p class="eyebrow">排行榜</p>' + QA.leaderboardRows(p.scores, clientId, 10) + '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderPodiumScreen() {
+    return '<div class="shell">' + topbar() + QA.renderPodium(p.scores, clientId) + '</div>';
+  }
+
+  function render() {
+    var html;
+    if (!p.joined) {
+      html = renderJoinForm();
+    } else if (p.phase === 'lobby' || p.phase === null) {
+      html = renderLobbyWait();
+    } else if (p.phase === 'announcement') {
+      html = renderAnnouncement();
+    } else if (p.phase === 'question') {
+      html = renderQuestion();
+    } else if (p.phase === 'reveal') {
+      html = renderReveal();
+    } else if (p.phase === 'podium') {
+      html = renderPodiumScreen();
+    } else {
+      html = renderLobbyWait();
+    }
+    if (notice) html += '<div class="toast">' + QA.esc(notice) + '</div>';
+    app.innerHTML = html;
+  }
+
+  app.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-action]');
+    if (!t) return;
+    var action = t.getAttribute('data-action');
+    if (action === 'join-submit') joinGame();
+    else if (action === 'leave') leaveGame();
+    else if (action === 'answer') submitAnswer(parseInt(t.getAttribute('data-idx'), 10));
+  });
+
+  app.addEventListener('input', function (e) {
+    var t = e.target;
+    if (t.id === 'join-code') p.code = t.value.replace(/[^0-9]/g, '').slice(0, 6);
+    else if (t.id === 'join-name') p.name = t.value;
+  });
+
+  app.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && (e.target.id === 'join-code' || e.target.id === 'join-name')) {
+      e.preventDefault();
+      joinGame();
+    }
+  });
+
+  setInterval(function () {
+    if (p.joined && p.phase === 'question') render();
+  }, 500);
+
+  render();
+})();
+</script>
+</body>
+</html>
