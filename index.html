@@ -129,6 +129,35 @@
       '</div>';
   }
 
+  function renderRoundInfo() {
+    var qs = (window.QUIZ && window.QUIZ.questions) || [];
+    var rounds = [];
+    var current = null;
+    qs.forEach(function (item) {
+      if (item.type === 'announcement') {
+        current = { title: item.title, durations: [] };
+        rounds.push(current);
+      } else if (current) {
+        current.durations.push(item.duration);
+      }
+    });
+    if (!rounds.length) return '';
+    var rows = rounds.map(function (r) {
+      var uniq = r.durations.filter(function (d, i) { return r.durations.indexOf(d) === i; });
+      uniq.sort(function (a, b) { return a - b; });
+      var label = uniq.length <= 1 ? ((uniq[0] || 20) + ' 秒/題') : (uniq.join('～') + ' 秒');
+      return '<div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:10px">' +
+        '<span style="font-weight:600;flex:1;min-width:0">' + QA.esc(r.title) + '</span>' +
+        '<span style="font-family:var(--font-mono);font-weight:700;white-space:nowrap;flex:none">' + label + '</span>' +
+        '</div>';
+    }).join('');
+    return '<div class="card-flat stack">' +
+      '<p class="eyebrow">比賽規則</p>' +
+      '<p style="margin:0">這場比的不只是正確率，還要比手速⚡越快答對分數越高！每題都有作答時限，時間到就不能再送出答案了，各關卡的作答秒數如下：</p>' +
+      '<div class="stack" style="gap:8px">' + rows + '</div>' +
+      '</div>';
+  }
+
   function renderJoinForm() {
     var html = '<div class="shell">' + topbar();
     html += '<div class="card stack">' +
@@ -137,7 +166,9 @@
       '<label class="field">你的暱稱<input type="text" id="join-name" maxlength="16" value="' + QA.esc(p.name) + '" placeholder="輸入暱稱"></label>' +
       (p.joinErr ? '<p style="color:var(--bad);font-weight:600">' + QA.esc(p.joinErr) + '</p>' : '') +
       '<button class="btn btn-primary btn-lg btn-block" data-action="join-submit" ' + (p.joining ? 'disabled' : '') + '>' + (p.joining ? '連線中…' : '加入遊戲') + '</button>' +
-      '</div></div>';
+      '</div>';
+    html += renderRoundInfo();
+    html += '</div>';
     return html;
   }
 
